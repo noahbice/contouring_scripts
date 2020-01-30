@@ -5,33 +5,41 @@ from unet import Unet
 import torch.nn.functional as F
 from data import AutosegData
 from tqdm import tqdm
+from os import listdir
+
+structs = ['Spinal-Cord', 'Neck-Right', 'Neck-Left', \
+        'Submandibular-Gland-Right', 'Submandibular-Gland-Left', 'Parotid-Right', \
+        'Parotid-Left', 'Oral-Cavity', 'Medulla-Oblongata', 'Brain'] 
 
 #-------------------
-mode = 'bowel'
+mode = 'Spinal-Cord'
 #training options
-epochs = 2500
-batch_size = 25
-learning_rate = 0.001
+epochs = 400
+batch_size = 16
+learning_rate = 0.002
 #model options
-depth = 5
-f=4
+depth = 4
+f=3
 dropout = 0.25
 batchnorm = True
 padding = True
-b_spline = True
-rotate = True
+b_spline = False
+rotate = False
 #saving and loading
-save_over = True
+save_over = False
 #-------------------
+
+structs = {structs[i] : i for i in range(len(structs))}
+structure = structs[mode]
 
 model_load_file = './pthdata/' + mode + '.pth'
 loss_load_file = './npydata/loss/' + mode + '_loss.npy'
+val_loss_load_file = './npydata/loss/' + mode + '_validation_loss.npy'
+
 if save_over:
     model_save_file = model_load_file
-    loss_save_file = loss_load_file
 else:
     model_save_file = './pthdata/' + mode + '_updated.pth'
-    loss_save_file = './npydata/loss/' + mode + '_updated_loss.npy'
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = Unet(depth=depth, f=f, padding=padding, batchnorm=batchnorm, dropout=dropout).to(device)
@@ -39,26 +47,53 @@ model = model.train()
 optim = torch.optim.Adam(model.parameters(), lr=learning_rate)
 checkpoint = torch.load(model_load_file)
 model.load_state_dict(checkpoint['model_state_dict'])
-loss_arr = np.load(loss_load_file)
-epoch_loss = 0
+
+
+patients = listdir('./npydata/train/' + mode + '/cts/')
+test_patients = listdir('./npydata/test/' + mode + '/cts/')
+loss_arr = list(np.load(loss_load_file))
+val_loss_arr = list(np.load(val_loss_load_file))
 best_loss = np.inf
-dataset = AutosegData(mode, b_spline=b_spline, rotate=rotate)
-dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-for _ in tqdm(range(epochs)):
-    for X, y in dataloader:
-        optim.zero_grad()
-        X = X.to(device)
-        y = y.to(device) 
-        prediction = model(X.float())
-        loss = F.binary_cross_entropy(prediction, y.float())
-        l = loss.detach().cpu().numpy()
-        epoch_loss += l
-        loss.backward()
-        optim.step()
-    #print('loss: ' + str(epoch_loss))
-    loss_arr = np.append(loss_arr, epoch_loss)
-    if epoch_loss < best_loss:
-            torch.save({'model_state_dict': model.state_dict()}, model_save_file)
-            best_loss = epoch_loss
-    epoch_loss = 0
-    np.save(loss_save_file, loss_arr)
+
+for epoch in tqdm(range(epochs)):
+    shuffle(patients)
+    epoch_loss = 0.
+    for patient in patients:
+        index = patient.split('.')[0]
+        data = AutosegData(mode, index, b_spline=b_spline, rotate=rotate)
+        dataloader = DataLoader(data, batch_size=batch_size, shuffle=True)
+        for X, y in dataloader:
+            optim.zero_grad()
+            prediction = model(X)
+            loss = F.binary_cross_entropy(prediction.reshape(-1), y.float().reshape(-1))
+            l = loss.detach().cpu().numpy()
+            epoch_loss += l
+            loss.backward()
+            optim.step()
+            
+    #free up GPU memory
+    del data
+    del dataloader
+    torch.cuda.empty_cache()
+    
+    #get validation loss
+    val_loss = 0.
+    for file in test_patients:
+        index = file.split('.')[0]
+        data = AutosegData(mode, index, b_spline=False, rotate=False, test=True)
+        dataloader = DataLoader(data, batch_size=batch_size, shuffle=False)
+        for X, y in dataloader:
+            prediction = model(X)
+            loss = F.binary_cross_entropy(prediction.reshape(-1), y.float().reshape(-1))
+            l = loss.detach().cpu().numpy()
+            val_loss += l
+            
+    if val_loss < best_loss: #change to val_loss
+        torch.save({'model_state_dict': model.state_dict()}, model_save_directory)
+        best_loss = val_loss
+        
+    loss_arr.append(epoch_loss)
+    val_loss_arr.append(val_loss)
+    
+    np.save(loss_load_file, loss_arr)
+    np.save(val_loss_load_file, val_loss_arr)

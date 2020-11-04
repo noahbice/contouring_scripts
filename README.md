@@ -1,4 +1,4 @@
-# Head and Neck Segmentation Stuff
+# Head and Neck Segmentation Stuff for Ruiqi
 Retrieve DICOM data from using data retriever, then run the following scripts in order. 
 
 ### 0.0 dcm_to_masks.py  
